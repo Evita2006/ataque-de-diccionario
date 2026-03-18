@@ -1,0 +1,86 @@
+import os
+import time
+import base64
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import hashes, padding # Importamos padding oficial
+from cryptography.hazmat.backends import default_backend
+
+# Configuración global para que coincida en ambos procesos
+ITERACIONES = 500_000 
+
+def derivar_clave(password, salt, iteraciones=ITERACIONES):
+    """Genera una clave AES de 32 bytes (256 bits) con PBKDF2"""
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=iteraciones,
+        backend=default_backend()
+    )
+    return kdf.derive(password.encode())
+
+def cifrar_mensaje(mensaje, password):
+    """Cifra un mensaje con AES-CBC y PBKDF2"""
+    salt = os.urandom(16)
+    clave = derivar_clave(password, salt)
+    iv = os.urandom(16)
+
+    # 1. Aplicar Padding estándar PKCS7 (más seguro que el manual)
+    padder = padding.PKCS7(128).padder()
+    datos_padded = padder.update(mensaje.encode()) + padder.finalize()
+
+    # 2. Cifrar
+    cipher = Cipher(algorithms.AES(clave), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    cifrado = encryptor.update(datos_padded) + encryptor.finalize()
+
+    # 3. Empaquetar todo en Base64
+    return base64.b64encode(salt + iv + cifrado).decode()
+
+def descifrar_mensaje(mensaje_cifrado_b64, password, iteraciones=ITERACIONES):
+    """Descifra el mensaje capturando errores de clave incorrecta"""
+    try:
+        # 1. Desempaquetar
+        datos = base64.b64decode(mensaje_cifrado_b64)
+        salt, iv, cuerpo_cifrado = datos[:16], datos[16:32], datos[32:]
+
+        # 2. Derivar clave (Aquí es donde tarda el tiempo de CPU)
+        clave = derivar_clave(password, salt, iteraciones)
+
+        # 3. Descifrar
+        cipher = Cipher(algorithms.AES(clave), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        datos_padded = decryptor.update(cuerpo_cifrado) + decryptor.finalize()
+
+        # 4. Quitar Padding
+        unpadder = padding.PKCS7(128).unpadder()
+        mensaje_claro = unpadder.update(datos_padded) + unpadder.finalize()
+        
+        return mensaje_claro.decode()
+    
+    except Exception:
+        # Si la clave es incorrecta, el unpadder o el decryptor fallarán
+        return None
+
+# --- Pruebas ---
+if __name__ == "__main__":
+    password_correcta = "clave_secreta_123"
+    mensaje_original = "Suspenso el que lo lea"
+
+    print("Cifrando mensaje...")
+    token = cifrar_mensaje(mensaje_original, password_correcta)
+    print(f"Token generado: {token}\n")
+
+    print("Intentando descifrar con clave CORRECTA...")
+    inicio = time.time()
+    resultado = descifrar_mensaje(token, password_correcta)
+    fin = time.time()
+    
+    if resultado:
+        print(f"ÉXITO: {resultado} (Tiempo: {fin - inicio:.2f}s)")
+    
+    print("\nIntentando descifrar con clave INCORRECTA...")
+    resultado_fallido = descifrar_mensaje(token, "clave_error")
+    if resultado_fallido is None:
+        print("FALLO: Clave incorrecta detectada correctamente.")
